@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Ferrum</title>
+<style>
+:root{--bg:#fff;--fg:#111;--mut:#6b7280;--card:#f3f4f6;--acc:#d9480f;--line:#e5e7eb;--theirs:#eceef1}
+@media(prefers-color-scheme:dark){:root{--bg:#0e0f12;--fg:#f3f4f6;--mut:#9aa0a9;--card:#1a1c21;--line:#2a2d34;--theirs:#23262d}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:16px -apple-system,system-ui,sans-serif}
+.screen{display:none;height:100dvh;flex-direction:column;padding-top:env(safe-area-inset-top)}
+.screen.on{display:flex}
+header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line)}
+header h1{flex:1;margin:0;font-size:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+button{font:inherit;border:0;border-radius:10px;padding:10px 14px;background:var(--acc);color:#fff}
+button.ghost{background:var(--card);color:var(--fg)}
+button.sm{padding:6px 10px;font-size:14px}
+button:disabled{opacity:.5}
+input{font:inherit;width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+.pad{padding:20px;display:flex;flex-direction:column;gap:12px;margin:auto 0}
+.pad h1{margin:0;font-size:32px;color:var(--acc)}
+.mut{color:var(--mut);font-size:14px}
+#roomlist,#msgs{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.room{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.info{flex:1;min-width:0}
+.rname{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prev{color:var(--mut);font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty{text-align:center;color:var(--mut);margin-top:40px}
+#msgs{padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+.msg{max-width:80%;padding:8px 12px;border-radius:16px;white-space:pre-wrap;word-break:break-word}
+.msg.mine{align-self:flex-end;background:var(--acc);color:#fff}
+.msg.theirs{align-self:flex-start;background:var(--theirs)}
+.who{font-size:12px;font-weight:600;opacity:.7;margin-bottom:2px}
+.bar{display:flex;gap:8px;padding:8px 12px;padding-bottom:calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--line)}
+#toast{position:fixed;left:16px;right:16px;bottom:calc(80px + env(safe-area-inset-bottom));background:#222;color:#fff;padding:12px;border-radius:10px;display:none;z-index:9}
+</style>
+</head>
+<body>
+<section id="login" class="screen">
+  <div class="pad">
+    <h1>Ferrum</h1>
+    <div class="mut">A tiny Matrix client written in Rust.</div>
+    <input id="server" value="matrix.org" autocapitalize="off" autocorrect="off" placeholder="Homeserver">
+    <input id="user" autocapitalize="off" autocorrect="off" placeholder="Username">
+    <input id="pass" type="password" placeholder="Password">
+    <button id="loginBtn">Sign in</button>
+  </div>
+</section>
+
+<section id="rooms" class="screen">
+  <header><h1>Rooms</h1><button class="sm ghost" id="logoutBtn">Sign out</button></header>
+  <div id="roomlist"></div>
+  <div class="bar">
+    <input id="joinInput" autocapitalize="off" autocorrect="off" placeholder="#room:server">
+    <button id="joinBtn">Join</button>
+  </div>
+</section>
+
+<section id="chat" class="screen">
+  <header><button class="sm ghost" id="back">‹</button><h1 id="title"></h1><button class="sm ghost" id="leaveBtn">Leave</button></header>
+  <div id="msgs"></div>
+  <div class="bar">
+    <input id="compose" placeholder="Message" enterkeyhint="send">
+    <button id="sendBtn">Send</button>
+  </div>
+</section>
+<div id="toast"></div>
+
+<script>
+const T = window.__TAURI__;
+const invoke = T.core.invoke;
+const $ = (id) => document.getElementById(id);
+let current = null;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function show(id) {
+  for (const s of document.querySelectorAll('.screen')) s.classList.toggle('on', s.id === id);
+}
+let toastTimer;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = String(msg);
+  t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.style.display = 'none'), 3500);
+}
+async function run(fn) { try { await fn(); } catch (e) { toast(e); } }
+
+async function renderRooms() {
+  const rooms = await invoke('rooms');
+  const list = $('roomlist');
+  list.replaceChildren();
+  if (!rooms.length) { list.append(el('p', 'empty', 'Syncing…')); return; }
+  for (const r of rooms) {
+    const row = el('div', 'room');
+    const info = el('div', 'info');
+    info.append(el('div', 'rname', r.name), el('div', 'prev', r.invited ? 'Invitation' : r.preview));
+    row.append(info);
+    if (r.invited) {
+      const yes = el('button', 'sm', 'Join');
+      yes.onclick = () => run(() => invoke('join', { roomId: r.id }));
+      const no = el('button', 'sm ghost', 'Decline');
+      no.onclick = () => run(async () => { await invoke('leave', { roomId: r.id }); renderRooms(); });
+      row.append(yes, no);
+    } else {
+      row.onclick = () => openRoom(r);
+    }
+    list.append(row);
+  }
+}
+
+async function renderChat(forceScroll) {
+  if (!current) return;
+  const msgs = await invoke('messages', { roomId: current.id });
+  const box = $('msgs');
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  box.replaceChildren();
+  let prev = null;
+  for (const m of msgs) {
+    const b = el('div', 'msg ' + (m.mine ? 'mine' : 'theirs'));
+    if (!m.mine && m.sender !== prev) b.append(el('div', 'who', m.sender_name));
+    b.append(el('div', '', m.body));
+    box.append(b);
+    prev = m.sender;
+  }
+  if (forceScroll || nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+function openRoom(r) {
+  current = r;
+  $('title').textContent = r.name;
+  show('chat');
+  renderChat(true);
+}
+
+async function doSend() {
+  const input = $('compose');
+  const body = input.value.trim();
+  if (!body || !current) return;
+  input.value = '';
+  try { await invoke('send', { roomId: current.id, body }); }
+  catch (e) { input.value = body; toast(e); }
+}
+
+let timer;
+function refresh() {
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    if ($('rooms').classList.contains('on')) renderRooms();
+    if ($('chat').classList.contains('on')) renderChat(false);
+  }, 80);
+}
+
+$('loginBtn').onclick = async () => {
+  const btn = $('loginBtn');
+  btn.disabled = true;
+  try {
+    await invoke('login', { server: $('server').value, user: $('user').value, password: $('pass').value });
+    $('pass').value = '';
+    show('rooms');
+    renderRooms();
+  } catch (e) { toast(e); }
+  btn.disabled = false;
+};
+$('logoutBtn').onclick = () => run(async () => { await invoke('logout'); show('login'); });
+$('back').onclick = () => { current = null; show('rooms'); renderRooms(); };
+$('leaveBtn').onclick = () => run(async () => {
+  const id = current.id; current = null;
+  await invoke('leave', { roomId: id });
+  show('rooms'); renderRooms();
+});
+$('joinBtn').onclick = () => run(async () => {
+  const v = $('joinInput').value.trim();
+  if (!v) return;
+  await invoke('join', { roomId: v });
+  $('joinInput').value = '';
+});
+$('sendBtn').onclick = doSend;
+$('compose').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
+
+T.event.listen('matrix-update', refresh);
+T.event.listen('matrix-signed-out', async () => {
+  await invoke('logout'); show('login'); toast('Session expired, please sign in again');
+});
+
+(async () => {
+  const uid = await invoke('restore');
+  if (uid) { show('rooms'); renderRooms(); } else { show('login'); }
+})();
+</script>
+</body>
+</html>
