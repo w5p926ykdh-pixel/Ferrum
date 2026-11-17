@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Ferrum</title>
+<style>
+:root{--bg:#fff;--fg:#111;--mut:#6b7280;--card:#f3f4f6;--acc:#d9480f;--line:#e5e7eb;--theirs:#eceef1}
+@media(prefers-color-scheme:dark){:root{--bg:#0e0f12;--fg:#f3f4f6;--mut:#9aa0a9;--card:#1a1c21;--line:#2a2d34;--theirs:#23262d}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:16px -apple-system,system-ui,sans-serif}
+.screen{display:none;height:100dvh;flex-direction:column;padding-top:env(safe-area-inset-top)}
+.screen.on{display:flex}
+header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line)}
+header h1{flex:1;margin:0;font-size:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+button{font:inherit;border:0;border-radius:10px;padding:10px 14px;background:var(--acc);color:#fff}
+button.ghost{background:var(--card);color:var(--fg)}
+button.sm{padding:6px 10px;font-size:14px}
+button.icon{padding:10px 12px;background:var(--card);color:var(--fg)}
+button:disabled{opacity:.5}
+input{font:inherit;width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+.pad{padding:20px;display:flex;flex-direction:column;gap:12px;margin:auto 0}
+.pad h1{margin:0;font-size:32px;color:var(--acc)}
+.mut{color:var(--mut);font-size:14px}
+#roomlist,#msgs{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.room{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.info{flex:1;min-width:0}
+.rname{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prev{color:var(--mut);font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty{text-align:center;color:var(--mut);margin-top:40px}
+.av{width:34px;height:34px;border-radius:50%;flex:none;overflow:hidden;background:var(--card);display:flex;align-items:center;justify-content:center;font-weight:600;color:var(--mut)}
+.av img{width:100%;height:100%;object-fit:cover}
+#msgs{padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+.msg{max-width:80%;padding:8px 12px;border-radius:16px;white-space:pre-wrap;word-break:break-word}
+.msg.mine{align-self:flex-end;background:var(--acc);color:#fff}
+.msg.theirs{align-self:flex-start;background:var(--theirs)}
+.msg.media{padding:4px}
+.msg.media img,.msg.media video{max-width:100%;border-radius:12px;display:block}
+.msg audio{max-width:240px}
+.who{font-size:12px;font-weight:600;opacity:.7;margin-bottom:2px;padding:0 8px}
+.bar{display:flex;gap:8px;padding:8px 12px;padding-bottom:calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--line)}
+#toast{position:fixed;left:16px;right:16px;bottom:calc(80px + env(safe-area-inset-bottom));background:#222;color:#fff;padding:12px;border-radius:10px;display:none;z-index:9}
+#bad{display:none;position:fixed;inset:0;background:#000;z-index:20}
+#bad video,#bad canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:none}
+</style>
+</head>
+<body>
+<section id="login" class="screen">
+  <div class="pad">
+    <h1>Ferrum</h1>
+    <div class="mut">A tiny Matrix client written in Rust.</div>
+    <input id="server" value="matrix.org" autocapitalize="off" autocorrect="off" placeholder="Homeserver">
+    <input id="user" autocapitalize="off" autocorrect="off" placeholder="Username">
+    <input id="pass" type="password" placeholder="Password">
+    <button id="loginBtn">Sign in</button>
+  </div>
+</section>
+
+<section id="rooms" class="screen">
+  <header><h1>Rooms</h1><button class="sm ghost" id="logoutBtn">Sign out</button></header>
+  <div id="roomlist"></div>
+  <div class="bar">
+    <input id="joinInput" autocapitalize="off" autocorrect="off" placeholder="#room:server">
+    <button id="joinBtn">Join</button>
+  </div>
+</section>
+
+<section id="chat" class="screen">
+  <header>
+    <button class="sm ghost" id="back">‹</button>
+    <div class="av" id="roomAv"></div>
+    <h1 id="title"></h1>
+    <button class="sm ghost" id="leaveBtn">Leave</button>
+  </header>
+  <div id="msgs"></div>
+  <div class="bar">
+    <button class="icon" id="attachBtn" title="Attach">+</button>
+    <input type="file" id="file" accept="image/*,video/*,audio/*,*/*" hidden>
+    <input id="compose" placeholder="Message" enterkeyhint="send">
+    <button id="sendBtn">Send</button>
+  </div>
+</section>
+<div id="toast"></div>
+<div id="bad"><video id="badvid" playsinline></video><canvas id="badcanvas"></canvas></div>
+
+<script>
+const T = window.__TAURI__;
+const invoke = T.core.invoke;
+const $ = (id) => document.getElementById(id);
+let current = null;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function show(id) {
+  for (const s of document.querySelectorAll('.screen')) s.classList.toggle('on', s.id === id);
+}
+let toastTimer;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = String(msg);
+  t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.style.display = 'none'), 3500);
+}
+async function run(fn) { try { await fn(); } catch (e) { toast(e); } }
+
+// ---- media helpers ----
+const mediaCache = new Map();
+function mediaURL(mxc, thumb) {
+  const key = mxc + (thumb ? '#t' : '');
+  if (!mediaCache.has(key)) {
+    mediaCache.set(key, invoke('media', { mxc, thumb })
+      .then(([mime, b64]) => `data:${mime};base64,${b64}`)
+      .catch((e) => { mediaCache.delete(key); throw e; }));
+  }
+  return mediaCache.get(key);
+}
+async function setAvatar(box, mxc, name) {
+  box.replaceChildren(document.createTextNode((name || '?').charAt(0).toUpperCase()));
+  if (!mxc) return;
+  try {
+    const img = el('img');
+    img.src = await mediaURL(mxc, true);
+    box.replaceChildren(img);
+  } catch {}
+}
+function fileToB64(f) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(',')[1]);
+    r.onerror = () => rej('Could not read file');
+    r.readAsDataURL(f);
+  });
+}
+
+// ---- Bad Apple easter egg ----
+// Plays ./badapple.mp4 (bundled from dist/) for 15 seconds if present;
+// otherwise runs a 15-second procedural fallback animation.
+let badStop = null;
+function fallbackAnim(canvas) {
+  const ctx = canvas.getContext('2d');
+  const t0 = performance.now();
+  let raf;
+  const loop = (now) => {
+    const t = (now - t0) / 1000;
+    const w = (canvas.width = innerWidth), h = (canvas.height = innerHeight);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#fff';
+    const cx = w / 2, cy = h / 2, R = Math.min(w, h) * 0.3;
+    ctx.beginPath();
+    for (let a = 0; a <= Math.PI * 2 + 0.05; a += 0.05) {
+      const r = R * (1 + 0.15 * Math.sin(3 * a + t * 4) + 0.08 * Math.sin(7 * a - t * 3));
+      const x = cx + r * Math.cos(a), y = cy + r * Math.sin(a);
+      if (a === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.fill();
+    for (let i = 0; i < 60; i++) {
+      const x = (Math.sin(i * 91.7 + t * 7) * 0.5 + 0.5) * w;
+      const y = (Math.cos(i * 37.3 + t * 5) * 0.5 + 0.5) * h;
+      ctx.fillRect(x, y, 6, 6);
+    }
+    raf = requestAnimationFrame(loop);
+  };
+  raf = requestAnimationFrame(loop);
+  return () => cancelAnimationFrame(raf);
+}
+function playBadApple() {
+  if (badStop) badStop();
+  const ov = $('bad'), v = $('badvid'), c = $('badcanvas');
+  ov.style.display = 'block';
+  v.style.display = 'none';
+  c.style.display = 'none';
+  let stopFallback = null;
+  let fallbackOn = false;
+  const startFallback = () => {
+    if (fallbackOn) return;
+    fallbackOn = true;
+    v.pause();
+    v.style.display = 'none';
+    c.style.display = 'block';
+    stopFallback = fallbackAnim(c);
+  };
+  v.onerror = startFallback;
+  v.onplaying = () => { v.style.display = 'block'; };
+  v.src = 'badapple.mp4';
+  v.play().catch(startFallback);
+  const timer = setTimeout(stop, 15000);
+  function stop() {
+    clearTimeout(timer);
+    v.pause();
+    v.removeAttribute('src');
+    v.load();
+    if (stopFallback) stopFallback();
+    ov.style.display = 'none';
+    badStop = null;
+  }
+  badStop = stop;
+}
+$('bad').onclick = () => { if (badStop) badStop(); };
+
+// ---- rooms ----
+async function renderRooms() {
+  const rooms = await invoke('rooms');
+  const list = $('roomlist');
+  list.replaceChildren();
+  if (!rooms.length) { list.append(el('p', 'empty', 'Syncing…')); return; }
+  for (const r of rooms) {
+    const row = el('div', 'room');
+    const av = el('div', 'av');
+    setAvatar(av, r.avatar, r.name);
+    const info = el('div', 'info');
+    info.append(el('div', 'rname', r.name), el('div', 'prev', r.invited ? 'Invitation' : r.preview));
+    row.append(av, info);
+    if (r.invited) {
+      const yes = el('button', 'sm', 'Join');
+      yes.onclick = () => run(() => invoke('join', { roomId: r.id }));
+      const no = el('button', 'sm ghost', 'Decline');
+      no.onclick = () => run(async () => { await invoke('leave', { roomId: r.id }); renderRooms(); });
+      row.append(yes, no);
+    } else {
+      row.onclick = () => openRoom(r);
+    }
+    list.append(row);
+  }
+}
+
+// ---- messages ----
+function contentEl(m) {
+  if (m.kind === 'm.image') {
+    const img = el('img');
+    img.alt = m.body;
+    mediaURL(m.url, false).then((u) => (img.src = u)).catch(() => (img.alt = '[image unavailable]'));
+    return img;
+  }
+  if (m.kind === 'm.video') {
+    const v = el('video');
+    v.controls = true;
+    v.playsInline = true;
+    mediaURL(m.url, false).then((u) => (v.src = u)).catch(() => {});
+    return v;
+  }
+  if (m.kind === 'm.audio') {
+    const a = el('audio');
+    a.controls = true;
+    mediaURL(m.url, false).then((u) => (a.src = u)).catch(() => {});
+    return a;
+  }
+  if (m.kind === 'm.file') {
+    const f = el('div', '', '📎 ' + m.body);
+    f.style.textDecoration = 'underline';
+    f.onclick = () => run(async () => window.open(await mediaURL(m.url, false)));
+    return f;
+  }
+  return el('div', '', m.body);
+}
+
+async function renderChat(forceScroll) {
+  if (!current) return;
+  const msgs = await invoke('messages', { roomId: current.id });
+  const box = $('msgs');
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  box.replaceChildren();
+  let prev = null;
+  for (const m of msgs) {
+    const isMedia = m.kind !== 'm.text' && m.kind !== 'm.notice' && m.kind !== 'm.emote';
+    const b = el('div', 'msg ' + (m.mine ? 'mine' : 'theirs') + (isMedia ? ' media' : ''));
+    if (!m.mine && m.sender !== prev) b.append(el('div', 'who', m.sender_name));
+    b.append(contentEl(m));
+    box.append(b);
+    prev = m.sender;
+  }
+  if (forceScroll || nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+function openRoom(r) {
+  current = r;
+  $('title').textContent = r.name;
+  setAvatar($('roomAv'), r.avatar, r.name);
+  show('chat');
+  renderChat(true);
+}
+
+async function doSend() {
+  const input = $('compose');
+  const body = input.value.trim();
+  if (!body || !current) return;
+  if (/:badapple:/i.test(body)) playBadApple();
+  input.value = '';
+  try { await invoke('send', { roomId: current.id, body }); }
+  catch (e) { input.value = body; toast(e); }
+}
+
+$('attachBtn').onclick = () => $('file').click();
+$('file').onchange = () => run(async () => {
+  const f = $('file').files[0];
+  $('file').value = '';
+  if (!f || !current) return;
+  if (f.size > 25 * 1024 * 1024) throw 'File is larger than 25 MB';
+  toast('Uploading ' + f.name + '…');
+  const data = await fileToB64(f);
+  await invoke('send_file', { roomId: current.id, data, mime: f.type, name: f.name });
+  toast('Sent');
+});
+
+let timer;
+function refresh() {
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    if ($('rooms').classList.contains('on')) renderRooms();
+    if ($('chat').classList.contains('on')) renderChat(false);
+  }, 80);
+}
+
+$('loginBtn').onclick = async () => {
+  const btn = $('loginBtn');
+  btn.disabled = true;
+  try {
+    await invoke('login', { server: $('server').value, user: $('user').value, password: $('pass').value });
+    $('pass').value = '';
+    show('rooms');
+    renderRooms();
+  } catch (e) { toast(e); }
+  btn.disabled = false;
+};
+$('logoutBtn').onclick = () => run(async () => { await invoke('logout'); show('login'); });
+$('back').onclick = () => { current = null; show('rooms'); renderRooms(); };
+$('leaveBtn').onclick = () => run(async () => {
+  const id = current.id; current = null;
+  await invoke('leave', { roomId: id });
+  show('rooms'); renderRooms();
+});
+$('joinBtn').onclick = () => run(async () => {
+  const v = $('joinInput').value.trim();
+  if (!v) return;
+  await invoke('join', { roomId: v });
+  $('joinInput').value = '';
+});
+$('sendBtn').onclick = doSend;
+$('compose').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
+
+T.event.listen('matrix-update', refresh);
+T.event.listen('matrix-signed-out', async () => {
+  await invoke('logout'); show('login'); toast('Session expired, please sign in again');
+});
+
+(async () => {
+  const uid = await invoke('restore');
+  if (uid) { show('rooms'); renderRooms(); } else { show('login'); }
+})();
+</script>
+</body>
+</html>
